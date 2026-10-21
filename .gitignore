@@ -1,0 +1,10 @@
+# clasp: holds the script ID of a specific Sheet; each person keeps their own
+.clasp.json
+.clasprc.json
+
+# never commit secrets (tokens and WordPress passwords live in Script Properties)
+.env
+*.secret
+
+.DS_Store
+node_modules/

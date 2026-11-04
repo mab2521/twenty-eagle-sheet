@@ -32,7 +32,7 @@ README.md
 
 | Color | Owner | Columns | Behavior |
 |---|---|---|---|
-| Blue | Scraper | Case key, title, decision/argument dates, APL no., category, CourtPASS issues, JI status and docket entries, files available/unavailable, link check, last synced | Overwritten on every sync. Edits trigger a warning. |
+| Blue | Scraper | Case key, title, decision/argument dates, session, APL no., category, CourtPASS issues, JI status and docket entries, files available/unavailable, link check, last synced | Overwritten on every sync, except that a blank decision date or type, argument date or number, or session leaves the existing cell alone. Edits trigger a warning. |
 | Yellow | Reviewer | Blog summary, decision/video/transcript URLs, the four dropdown document columns, Request JL?, reviewer notes, reviewed by, Approved | Never overwritten. The summary and URL columns may be pre-filled by the sync only while blank. |
 | Green | Script | WP post ID, WP edit link, WP status | Written when a draft is created. |
 
@@ -101,6 +101,7 @@ Choose **Twenty Eagle → Test WordPress connection**. It reports which account 
       "title": "Matter of Clarke v. Board of Education",
       "decision_date": "10/17/2024",
       "argument_date": "09/11/2024",
+      "session": "September Session 24",
       "issues_courtpass": "Whether petitioners ... had standing ...",
       "ji_status": "None",
       "blog_summary": "optional pre-fill",

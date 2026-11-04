@@ -22,13 +22,15 @@ const SHEET_NAME = 'Cases';
 //        human   = never overwritten by sync (blank cells may be pre-filled, see SEEDED)
 //        wp      = written by createWordPressDrafts()
 // verbatim: true = stored character for character as received (see writeVerbatim_)
+// keepIfBlank: true = a sync with no value leaves the existing cell alone
 const COLUMNS = [
   { key: 'case_key',          header: 'Case key',              group: 'scraper', width: 160 },
   { key: 'title',             header: 'Case title',            group: 'scraper', width: 240 },
-  { key: 'decision_date',     header: 'Decision date',         group: 'scraper', width: 100 },
-  { key: 'decision_type',     header: 'Decision type',         group: 'scraper', width: 100 },
-  { key: 'argument_date',     header: 'Argument date',         group: 'scraper', width: 100 },
-  { key: 'argument_no',       header: 'Argument no.',          group: 'scraper', width: 90 },
+  { key: 'decision_date',     header: 'Decision date',         group: 'scraper', width: 100, keepIfBlank: true },
+  { key: 'decision_type',     header: 'Decision type',         group: 'scraper', width: 100, keepIfBlank: true },
+  { key: 'argument_date',     header: 'Argument date',         group: 'scraper', width: 100, keepIfBlank: true },
+  { key: 'argument_no',       header: 'Argument no.',          group: 'scraper', width: 90, keepIfBlank: true },
+  { key: 'session',           header: 'Session',               group: 'scraper', width: 150, keepIfBlank: true },
   { key: 'apl_number',        header: 'APL no.',               group: 'scraper', width: 120 },
   { key: 'category',          header: 'Category',              group: 'scraper', width: 180 },
   { key: 'issues_courtpass',  header: 'Issues (CourtPASS)',    group: 'scraper', width: 380, verbatim: true },
@@ -147,7 +149,7 @@ function columnMap_(sheet) {
 
 /** Lets you confirm in a browser that the deployed version is the current one. */
 function doGet() {
-  return ContentService.createTextOutput('Twenty Eagle sync endpoint is live (v4: page template)');
+  return ContentService.createTextOutput('Twenty Eagle sync endpoint is live (v5: session column)');
 }
 
 function doPost(e) {
@@ -191,6 +193,7 @@ function upsertCases_(cases) {
         rowByKey[c.case_key] = row;
       }
       scraperCols.forEach(sc => {
+        if (sc.keepIfBlank && !c[sc.key]) return;
         const cell = sheet.getRange(row, col[sc.key]);
         if (!sc.verbatim) { cell.setValue(safeText_(c[sc.key])); return; }
         if (!writeVerbatim_(cell, c[sc.key])) {

@@ -33,7 +33,7 @@ README.md
 | Color | Owner | Columns | Behavior |
 |---|---|---|---|
 | Blue | Scraper | Case key, title, decision/argument dates, APL no., category, CourtPASS issues, JI status and docket entries, files available/unavailable, link check, last synced | Overwritten on every sync. Edits trigger a warning. |
-| Yellow | Reviewer | Blog summary, decision/video/transcript URLs, Request JL?, reviewer notes, reviewed by, Approved | Never overwritten. The summary and URL columns may be pre-filled by the sync only while blank. |
+| Yellow | Reviewer | Blog summary, decision/video/transcript URLs, the four dropdown document columns, Request JL?, reviewer notes, reviewed by, Approved | Never overwritten. The summary and URL columns may be pre-filled by the sync only while blank. |
 | Green | Script | WP post ID, WP edit link, WP status | Written when a draft is created. |
 
 The script finds columns by header text, so columns can be reordered freely. Don't rename headers. Re-running `Set up sheet` is safe; it adds any missing columns and leaves data alone.
@@ -71,7 +71,7 @@ In **Project Settings → Script Properties**, add:
 | `WP_URL` | The WordPress site address, e.g. `https://example.com` (no trailing slash). |
 | `WP_USER` | WordPress username. |
 | `WP_APP_PASSWORD` | Created in WordPress under **Users → Profile → Application Passwords**. |
-| `WP_POST_TYPE` | Optional. Set to `pages` if each case is a WordPress Page; leave out for Posts. |
+| `WP_POST_TYPE` | Optional. Leave out to create Pages (the default); set to `posts` for Posts. |
 
 **Never put these values in the code or commit them to this repo.**
 
@@ -110,11 +110,20 @@ Choose **Twenty Eagle → Test WordPress connection**. It reports which account 
 }
 ```
 
-Keys match the `key` values in the `COLUMNS` list at the top of `Code.gs`. Unknown keys are ignored; missing scraper keys are written as blank. It returns `{ "ok": true, "added": [...], "updated": [...] }` or `{ "ok": false, "error": "..." }`.
+Keys match the `key` values in the `COLUMNS` list at the top of `Code.gs`. Unknown keys are ignored; missing scraper keys are written as blank. It returns `{ "ok": true, "added": [...], "updated": [...], "issue_mismatches": [...] }` or `{ "ok": false, "error": "..." }`.
 
 ## What a draft looks like
 
-Drafts copy the layout of the existing case pages: the blog summary in a wide left column, and a bordered box on the right with **Decision:** (linked to the decision URL) and **Argument:** followed by `vid.` and `tr.` links when those URLs are filled in. Dates are converted to the blog's style (`10/17/2024` → `2024.10.17`). Everything is built from standard WordPress blocks, so it's editable in the block editor. The "Select one…" dropdown on live pages is not generated.
+Drafts copy the layout of the existing case pages: the blog summary in a wide left column, and a bordered box on the right with **Decision:** (linked to the decision URL) and **Argument:** followed by `vid.` and `tr.` links when those URLs are filled in. Dates are converted to the blog's style (`10/17/2024` → `2024.10.17`). Everything is built from standard WordPress blocks, so it's editable in the block editor.
+
+Below that is the **Select one...** dropdown, written as the template's `[dropdown]` and `[dropdown-content]` shortcodes, so the plugin that provides them must be active. Its four options come from the **NYCA Merits Briefs**, **NYCA Other Materials**, **Lower Court Decision** and **Lower Court Materials** columns. Put one document per line in each:
+
+```
+Appellant's Brief | https://example.com/wp-content/uploads/appellant.pdf
+Leave Motion
+```
+
+A line with no URL appears as plain text. A malformed line stops that row's draft and shows `ERROR: ...` in **WP status**.
 
 A draft is only created when the row has a title, a blog summary, and reviewer initials. Problems are written to **WP status** as `ERROR: ...` and the other rows continue.
 
@@ -122,6 +131,7 @@ A draft is only created when the row has a title, a blog summary, and reviewer i
 
 - Post status is hard-coded to `draft`.
 - Scraped text beginning with `=` or `+` is stored as text, so it can't run as a formula.
+- `Issues (CourtPASS)` is stored exactly as received and read back after each write. Any case where the cell differs from the text sent is listed in `issue_mismatches` and logged under **Executions** in Apps Script.
 - The sync uses a script lock, so overlapping syncs don't write over each other.
 - Sites hosted on WordPress.com are detected and reported; they don't accept Application Passwords this way.
 

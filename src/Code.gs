@@ -13,7 +13,7 @@
  *   WP_URL            e.g. https://example.com   (no trailing slash)
  *   WP_USER           WordPress username
  *   WP_APP_PASSWORD   from WordPress > Users > Profile > Application Passwords
- *   WP_POST_TYPE      "pages" if each case is a WordPress Page; leave out for Posts
+ *   WP_POST_TYPE      optional; leave out to create Pages (the default), or "posts" for Posts
  */
 
 const SHEET_NAME = 'Cases';
@@ -21,6 +21,7 @@ const SHEET_NAME = 'Cases';
 // group: scraper = overwritten on every sync
 //        human   = never overwritten by sync (blank cells may be pre-filled, see SEEDED)
 //        wp      = written by createWordPressDrafts()
+// verbatim: true = stored character for character as received (see writeVerbatim_)
 const COLUMNS = [
   { key: 'case_key',          header: 'Case key',              group: 'scraper', width: 160 },
   { key: 'title',             header: 'Case title',            group: 'scraper', width: 240 },
@@ -30,7 +31,7 @@ const COLUMNS = [
   { key: 'argument_no',       header: 'Argument no.',          group: 'scraper', width: 90 },
   { key: 'apl_number',        header: 'APL no.',               group: 'scraper', width: 120 },
   { key: 'category',          header: 'Category',              group: 'scraper', width: 180 },
-  { key: 'issues_courtpass',  header: 'Issues (CourtPASS)',    group: 'scraper', width: 380 },
+  { key: 'issues_courtpass',  header: 'Issues (CourtPASS)',    group: 'scraper', width: 380, verbatim: true },
   { key: 'ji_status',         header: 'JI status',             group: 'scraper', width: 100 },
   { key: 'ji_filings',        header: 'JI docket entries',     group: 'scraper', width: 220 },
   { key: 'files_available',   header: 'Files available',       group: 'scraper', width: 280 },
@@ -42,6 +43,10 @@ const COLUMNS = [
   { key: 'decision_url',      header: 'Decision URL',          group: 'human', width: 200 },
   { key: 'video_url',         header: 'Argument video URL',    group: 'human', width: 200 },
   { key: 'transcript_url',    header: 'Transcript URL',        group: 'human', width: 200 },
+  { key: 'merits_briefs',         header: 'NYCA Merits Briefs',    group: 'human', width: 280 },
+  { key: 'other_materials',       header: 'NYCA Other Materials',  group: 'human', width: 280 },
+  { key: 'lower_court_decision',  header: 'Lower Court Decision',  group: 'human', width: 280 },
+  { key: 'lower_court_materials', header: 'Lower Court Materials', group: 'human', width: 280 },
   { key: 'request_jl',        header: 'Request JL?',           group: 'human', width: 90,  checkbox: true },
   { key: 'notes',             header: 'Reviewer notes',        group: 'human', width: 240 },
   { key: 'reviewed_by',       header: 'Reviewed by',           group: 'human', width: 100 },
@@ -53,7 +58,17 @@ const COLUMNS = [
 ];
 
 // Human columns the sync may pre-fill, but only while the cell is still blank
-const SEEDED = ['blog_summary', 'decision_url', 'video_url', 'transcript_url'];
+const SEEDED = ['blog_summary', 'decision_url', 'video_url', 'transcript_url',
+  'merits_briefs', 'other_materials', 'lower_court_decision', 'lower_court_materials'];
+
+// The "Select one..." dropdown on each case page, in template order.
+// Each column holds one document per line: "Label | URL" (no URL = plain text).
+const DROPDOWN_SECTIONS = [
+  { key: 'merits_briefs',         value: 'option1', label: 'NYCA Merits Briefs' },
+  { key: 'other_materials',       value: 'option2', label: 'NYCA Other Materials' },
+  { key: 'lower_court_decision',  value: 'option3', label: 'Lower Court Decision' },
+  { key: 'lower_court_materials', value: 'option4', label: 'Lower Court Materials' },
+];
 
 const GROUP_COLORS = { scraper: '#d9e2f3', human: '#fff2cc', wp: '#e2efda' };
 
@@ -132,7 +147,7 @@ function columnMap_(sheet) {
 
 /** Lets you confirm in a browser that the deployed version is the current one. */
 function doGet() {
-  return ContentService.createTextOutput('Twenty Eagle sync endpoint is live (v2: link lookup)');
+  return ContentService.createTextOutput('Twenty Eagle sync endpoint is live (v4: page template)');
 }
 
 function doPost(e) {
@@ -166,7 +181,7 @@ function upsertCases_(cases) {
         .forEach((r, i) => { if (r[0]) rowByKey[r[0]] = i + 2; });
     }
 
-    const added = [], updated = [];
+    const added = [], updated = [], issueMismatches = [];
     cases.forEach(c => {
       if (!c.case_key) return;
       let row = rowByKey[c.case_key];
@@ -175,7 +190,14 @@ function upsertCases_(cases) {
         row = sheet.getLastRow() + 1;
         rowByKey[c.case_key] = row;
       }
-      scraperCols.forEach(sc => sheet.getRange(row, col[sc.key]).setValue(safeText_(c[sc.key])));
+      scraperCols.forEach(sc => {
+        const cell = sheet.getRange(row, col[sc.key]);
+        if (!sc.verbatim) { cell.setValue(safeText_(c[sc.key])); return; }
+        if (!writeVerbatim_(cell, c[sc.key])) {
+          issueMismatches.push(c.title || c.case_key);
+          console.error('Sheet text differs from scraped text for ' + sc.key + ': ' + c.case_key);
+        }
+      });
 
       SEEDED.forEach(key => {
         const cell = sheet.getRange(row, col[key]);
@@ -190,10 +212,26 @@ function upsertCases_(cases) {
         updated.push(c.title);
       }
     });
-    return { ok: true, added: added, updated: updated };
+    return { ok: true, added: added, updated: updated, issue_mismatches: issueMismatches };
   } finally {
     lock.releaseLock();
   }
+}
+
+/**
+ * Stores text exactly as received: no trimming, no added apostrophe, and no
+ * conversion to a formula, number or date. Reads the cell back afterwards and
+ * returns false if what the sheet holds is not identical to what was sent.
+ */
+function writeVerbatim_(cell, value) {
+  const text = value == null ? '' : String(value);
+  cell.setNumberFormat('@');
+  if (text === '') {
+    cell.clearContent();
+  } else {
+    cell.setRichTextValue(SpreadsheetApp.newRichTextValue().setText(text).build());
+  }
+  return String(cell.getValue()) === text;
 }
 
 /** Stops scraped text from ever being interpreted as a spreadsheet formula. */
@@ -210,7 +248,7 @@ function wpConfig_() {
     url: (p.getProperty('WP_URL') || '').replace(/\/+$/, ''),
     user: p.getProperty('WP_USER'),
     pass: p.getProperty('WP_APP_PASSWORD'),
-    type: p.getProperty('WP_POST_TYPE') || 'posts',
+    type: p.getProperty('WP_POST_TYPE') || 'pages',
   };
   if (!cfg.url || !cfg.user || !cfg.pass) {
     throw new Error('Add WP_URL, WP_USER and WP_APP_PASSWORD under Project Settings > Script Properties.');
@@ -355,10 +393,9 @@ function createWordPressDrafts() {
 
 /**
  * The body of the draft, laid out like the existing case pages: the issues
- * summary in a wide left column and a bordered Decision / Argument box on the
- * right. Written as standard WordPress blocks so the reviewer can edit every
- * piece in the block editor. (The "Select one…" dropdown on the live pages is
- * not generated here.)
+ * summary in a wide left column, a bordered Decision / Argument box on the
+ * right, and the "Select one..." document dropdown underneath. Written as
+ * standard WordPress blocks so the reviewer can edit every piece in the editor.
  */
 function buildPostContent_(c) {
   const link = (url, label) => isHttpUrl_(url) ? '<a href="' + esc_(url) + '">' + label + '</a>' : '';
@@ -374,7 +411,8 @@ function buildPostContent_(c) {
   }
 
   const summary = '<!-- wp:paragraph -->\n<p>' + esc_(c.blog_summary) + '</p>\n<!-- /wp:paragraph -->';
-  if (!rows.length) return summary;
+  const dropdown = buildDropdown_(c);
+  if (!rows.length) return summary + '\n\n' + dropdown;
 
   const box = '<!-- wp:table {"hasFixedLayout":false} -->\n' +
     '<figure class="wp-block-table"><table><tbody>' +
@@ -385,7 +423,34 @@ function buildPostContent_(c) {
     '<!-- wp:column {"width":"66.66%"} -->\n<div class="wp-block-column" style="flex-basis:66.66%">' +
     summary + '</div>\n<!-- /wp:column -->\n\n' +
     '<!-- wp:column {"width":"33.33%"} -->\n<div class="wp-block-column" style="flex-basis:33.33%">' +
-    box + '</div>\n<!-- /wp:column --></div>\n<!-- /wp:columns -->';
+    box + '</div>\n<!-- /wp:column --></div>\n<!-- /wp:columns -->\n\n' + dropdown;
+}
+
+/** The [dropdown] and [dropdown-content] shortcodes from the page template. */
+function buildDropdown_(c) {
+  const options = DROPDOWN_SECTIONS.map(s =>
+    '[dropdown-option value="' + s.value + '"]' + s.label + '[/dropdown-option]').join('');
+  const contents = DROPDOWN_SECTIONS.map(s =>
+    '[dropdown-content value="' + s.value + '"]' + documentLines_(c[s.key], s.label) + '[/dropdown-content]').join('');
+  return '<!-- wp:shortcode -->\n' +
+    '[dropdown class="Court of Appeals Briefs"][dropdown-option]Select one...[/dropdown-option]' +
+    options + '[/dropdown]\n' + contents +
+    '\n<!-- /wp:shortcode -->';
+}
+
+/** Turns "Label | URL" lines into links. A line with no URL stays plain text.
+ *  A malformed line stops the draft, so a broken link can't slip through. */
+function documentLines_(cell, section) {
+  return String(cell || '').split(/\r?\n/).map(l => l.trim()).filter(String).map(line => {
+    const bar = line.lastIndexOf('|');
+    const label = (bar === -1 ? line : line.slice(0, bar)).trim();
+    const url = bar === -1 ? '' : line.slice(bar + 1).trim();
+    if (!label || isHttpUrl_(label) || (bar !== -1 && !isHttpUrl_(url))) {
+      throw new Error(section + ': use "Label | URL" on this line: ' + line);
+    }
+    const text = esc_(label).replace(/\[/g, '&#91;').replace(/\]/g, '&#93;');
+    return url ? '<a href="' + esc_(url) + '">' + text + '</a>' : text;
+  }).join('\n');
 }
 
 /** "05/26/2026" -> "2026.05.26", the date style used on the blog. */

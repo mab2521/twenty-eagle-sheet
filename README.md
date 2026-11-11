@@ -38,6 +38,14 @@ README.md
 
 The script finds columns by header text, so columns can be reordered freely. Don't rename headers. Re-running `Set up sheet` is safe; it adds any missing columns and leaves data alone.
 
+### Session tabs
+
+Each case lives on the tab for its session, named like the **Session** column (for example **September Session 25**). Tabs are created automatically, in date order after **Cases**. Cases with no session yet stay on **Cases**, and move to their session tab once a sync supplies one, keeping every reviewer edit and tick.
+
+Review and edit rows directly on the session tabs. **Create WordPress drafts for approved rows** checks every session tab and **Cases**. Other tabs you add (with names that aren't sessions) are ignored.
+
+To split a sheet filled by an earlier version, run **Twenty Eagle → Move cases into session tabs**. It's safe to run again, and if it stops partway on a large sheet, running it again finishes the rest. Only the script's own columns are moved; columns you added yourself on **Cases** are not copied.
+
 ## Setup
 
 ### 1. Add the script to a Google Sheet

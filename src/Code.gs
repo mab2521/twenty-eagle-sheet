@@ -2,6 +2,8 @@
  * Twenty Eagle case pipeline — Google Sheet side.
  *
  *   1. doPost()                 receives rows from sheet_sync.py (scraper -> Sheet)
+ *      Each case is filed on the tab for its session (e.g. "September Session 25");
+ *      cases with no session yet stay on the "Cases" tab.
  *   2. A human reviews the row, fills the yellow columns, ticks "Approved"
  *   3. createWordPressDrafts()  turns approved rows into WordPress DRAFTS
  *   4. A human reviews the draft in WordPress and publishes it there
@@ -16,7 +18,12 @@
  *   WP_POST_TYPE      optional; leave out to create Pages (the default), or "posts" for Posts
  */
 
-const SHEET_NAME = 'Cases';
+const SHEET_NAME = 'Cases';   // catch-all tab for cases with no session yet
+
+const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July',
+  'August', 'September', 'October', 'November', 'December'];
+// Session tabs are named like the Session column: "September Session 25"
+const SESSION_TAB = new RegExp('^(' + MONTH_NAMES.join('|') + ') Session (\\d{2})$');
 
 // group: scraper = overwritten on every sync
 //        human   = never overwritten by sync (blank cells may be pre-filled, see SEEDED)
@@ -81,17 +88,24 @@ function onOpen() {
     .createMenu('Twenty Eagle')
     .addItem('Create WordPress drafts for approved rows', 'createWordPressDrafts')
     .addSeparator()
+    .addItem('Move cases into session tabs', 'organizeSessionTabs')
     .addItem('Test WordPress connection', 'testWordPressConnection')
     .addItem('Set up sheet', 'setupSheet')
     .addToUi();
 }
 
-/** Creates the "Cases" tab, or adds any columns a newer version of this script
- *  introduced. Safe to re-run: existing data and edits are left alone. */
+/** Creates the "Cases" tab, and adds any columns a newer version of this script
+ *  introduced to it and every session tab. Safe to re-run: data and edits are left alone. */
 function setupSheet() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getSheetByName(SHEET_NAME) || ss.insertSheet(SHEET_NAME);
+  const sheet = ss.getSheetByName(SHEET_NAME) || ss.insertSheet(SHEET_NAME, 0);
+  prepareCaseSheet_(sheet);
+  caseSheets_().forEach(s => { if (s.getName() !== SHEET_NAME) prepareCaseSheet_(s); });
+  return sheet;
+}
 
+/** Headers, colours, widths, text formatting and warnings for one case tab. */
+function prepareCaseSheet_(sheet) {
   if (sheet.getLastRow() === 0) {
     sheet.getRange(1, 1, 1, COLUMNS.length).setValues([COLUMNS.map(c => c.header)]);
   } else {
@@ -127,9 +141,103 @@ function setupSheet() {
 
 function getSheet_() {
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME);
-  if (!sheet || sheet.getLastRow() < 1) return setupSheet();
+  if (!sheet) return setupSheet();
+  return ensureReady_(sheet);
+}
+
+/** Adds any missing columns to a case tab before it is used. */
+function ensureReady_(sheet) {
+  if (sheet.getLastRow() < 1) return prepareCaseSheet_(sheet);
   const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getDisplayValues()[0];
-  return COLUMNS.every(c => headers.indexOf(c.header) !== -1) ? sheet : setupSheet();
+  return COLUMNS.every(c => headers.indexOf(c.header) !== -1) ? sheet : prepareCaseSheet_(sheet);
+}
+
+/** The "Cases" tab plus every session tab. */
+function caseSheets_() {
+  return SpreadsheetApp.getActiveSpreadsheet().getSheets()
+    .filter(s => s.getName() === SHEET_NAME || SESSION_TAB.test(s.getName()));
+}
+
+/** "September Session 25" -> 202508, for keeping tabs in date order. */
+function sessionOrder_(name) {
+  const m = SESSION_TAB.exec(name);
+  return m ? (2000 + Number(m[2])) * 100 + MONTH_NAMES.indexOf(m[1]) : -1;
+}
+
+/** The tab for a session, created in date order after "Cases" if it doesn't exist.
+ *  A blank or unrecognised session means the "Cases" tab. */
+function sessionSheet_(session) {
+  if (!SESSION_TAB.test(session || '')) return getSheet_();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const existing = ss.getSheetByName(session);
+  if (existing) return ensureReady_(existing);
+  const order = sessionOrder_(session);
+  let pos = 0;
+  ss.getSheets().forEach((x, i) => {
+    const name = x.getName();
+    if (name === SHEET_NAME || (SESSION_TAB.test(name) && sessionOrder_(name) < order)) pos = i + 1;
+  });
+  return prepareCaseSheet_(ss.insertSheet(session, pos));
+}
+
+/** Where every case currently is: case key -> { sheet, row }. */
+function caseIndex_(colsOf) {
+  const index = {};
+  caseSheets_().forEach(sheet => {
+    ensureReady_(sheet);
+    const last = sheet.getLastRow();
+    if (last < 2) return;
+    sheet.getRange(2, colsOf(sheet).case_key, last - 1, 1).getDisplayValues()
+      .forEach((r, i) => { if (r[0]) index[r[0]] = { sheet: sheet, row: i + 2 }; });
+  });
+  return index;
+}
+
+/** Moves one case row to another tab, keeping every value, tick and reviewer edit.
+ *  Updates row numbers in the index for rows below it on the old tab. */
+function moveRow_(at, target, colsOf, index) {
+  const from = at.sheet, fromCol = colsOf(from), toCol = colsOf(target);
+  const values = from.getRange(at.row, 1, 1, from.getLastColumn()).getValues()[0];
+  const row = target.getLastRow() + 1;
+  COLUMNS.filter(c => c.checkbox).forEach(c => target.getRange(row, toCol[c.key]).insertCheckboxes());
+  const out = new Array(target.getLastColumn()).fill('');
+  COLUMNS.forEach(c => { out[toCol[c.key] - 1] = values[fromCol[c.key] - 1]; });
+  target.getRange(row, 1, 1, out.length).setValues([out]);
+  COLUMNS.filter(c => c.verbatim)
+    .forEach(c => writeVerbatim_(target.getRange(row, toCol[c.key]), values[fromCol[c.key] - 1]));
+  from.deleteRow(at.row);
+  Object.keys(index).forEach(k => {
+    const x = index[k];
+    if (x.sheet.getName() === from.getName() && x.row > at.row) x.row--;
+  });
+  return { sheet: target, row: row };
+}
+
+/** Menu item: moves every row on "Cases" that has a session onto its session tab.
+ *  Safe to re-run; if it stops partway on a large sheet, run it again. */
+function organizeSessionTabs() {
+  const ui = SpreadsheetApp.getUi();
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const colCache = {};
+    const colsOf = s => colCache[s.getName()] || (colCache[s.getName()] = columnMap_(s));
+    const cases = getSheet_();
+    const last = cases.getLastRow();
+    if (last < 2) { ui.alert('No cases on the "Cases" tab to move.'); return; }
+    const sessions = cases.getRange(2, colsOf(cases).session, last - 1, 1).getDisplayValues();
+    let moved = 0, kept = 0;
+    sessions.forEach((r, i) => {
+      const session = r[0].trim();
+      if (!SESSION_TAB.test(session)) { kept++; return; }
+      moveRow_({ sheet: cases, row: i + 2 - moved }, sessionSheet_(session), colsOf, {});
+      moved++;
+    });
+    ui.alert('Moved ' + moved + ' case(s) to their session tabs.' +
+      (kept ? '\n' + kept + ' case(s) have no session yet and stay on "Cases".' : ''));
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 /** Maps column key -> 1-based column number by reading the header row,
@@ -149,7 +257,7 @@ function columnMap_(sheet) {
 
 /** Lets you confirm in a browser that the deployed version is the current one. */
 function doGet() {
-  return ContentService.createTextOutput('Twenty Eagle sync endpoint is live (v5: session column)');
+  return ContentService.createTextOutput('Twenty Eagle sync endpoint is live (v6: session tabs)');
 }
 
 function doPost(e) {
@@ -172,26 +280,26 @@ function upsertCases_(cases) {
   const lock = LockService.getScriptLock();
   lock.waitLock(30000);
   try {
-    const sheet = getSheet_();
-    const col = columnMap_(sheet);
+    const colCache = {};
+    const colsOf = s => colCache[s.getName()] || (colCache[s.getName()] = columnMap_(s));
     const scraperCols = COLUMNS.filter(c => c.group === 'scraper');
-
-    const rowByKey = {};
-    const lastRow = sheet.getLastRow();
-    if (lastRow > 1) {
-      sheet.getRange(2, col.case_key, lastRow - 1, 1).getDisplayValues()
-        .forEach((r, i) => { if (r[0]) rowByKey[r[0]] = i + 2; });
-    }
+    const index = caseIndex_(colsOf);
 
     const added = [], updated = [], issueMismatches = [];
     cases.forEach(c => {
       if (!c.case_key) return;
-      let row = rowByKey[c.case_key];
-      const isNew = !row;
+      let at = index[c.case_key];
+      // A blank session in the sync keeps the case's existing session
+      const session = c.session ||
+        (at ? at.sheet.getRange(at.row, colsOf(at.sheet).session).getDisplayValue().trim() : '');
+      const target = sessionSheet_(session);
+      if (at && at.sheet.getName() !== target.getName()) at = moveRow_(at, target, colsOf, index);
+      const isNew = !at;
       if (isNew) {
-        row = sheet.getLastRow() + 1;
-        rowByKey[c.case_key] = row;
+        at = { sheet: target, row: target.getLastRow() + 1 };
+        index[c.case_key] = at;
       }
+      const sheet = at.sheet, row = at.row, col = colsOf(sheet);
       scraperCols.forEach(sc => {
         if (sc.keepIfBlank && !c[sc.key]) return;
         const cell = sheet.getRange(row, col[sc.key]);
@@ -338,36 +446,39 @@ function createWordPressDrafts() {
   let cfg;
   try { cfg = wpConfig_(); wpApiRoot_(cfg); } catch (err) { ui.alert(err.message); return; }
 
-  const sheet = getSheet_();
-  const col = columnMap_(sheet);
-  const lastRow = sheet.getLastRow();
-  if (lastRow < 2) { ui.alert('No cases in the sheet yet.'); return; }
-
-  const range = sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn());
-  const raw = range.getValues();            // real booleans for checkboxes
-  const text = range.getDisplayValues();    // everything else as shown
-  const get = (r, key) => text[r][col[key] - 1].trim();
-
+  // Approved rows with no draft yet, from "Cases" and every session tab
   const ready = [];
-  for (let r = 0; r < raw.length; r++) {
-    if (raw[r][col.approved - 1] === true && !get(r, 'wp_post_id')) ready.push(r);
-  }
+  caseSheets_().forEach(sheet => {
+    ensureReady_(sheet);
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) return;
+    const col = columnMap_(sheet);
+    const range = sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn());
+    const raw = range.getValues();            // real booleans for checkboxes
+    const text = range.getDisplayValues();    // everything else as shown
+    for (let r = 0; r < raw.length; r++) {
+      const get = key => text[r][col[key] - 1].trim();
+      if (raw[r][col.approved - 1] === true && !get('wp_post_id')) {
+        ready.push({ sheet: sheet, col: col, row: r + 2, get: get });
+      }
+    }
+  });
   if (!ready.length) {
     ui.alert('Nothing to do. Tick "Approved" on a row that has no WP post ID yet.');
     return;
   }
-  const names = ready.map(r => '• ' + get(r, 'title')).join('\n');
+  const names = ready.map(x => '• ' + x.get('title') + ' (' + x.sheet.getName() + ')').join('\n');
   const answer = ui.alert('Create ' + ready.length + ' WordPress draft(s)?',
     names + '\n\nThese are created as drafts. Nothing is published.', ui.ButtonSet.OK_CANCEL);
   if (answer !== ui.Button.OK) return;
 
   let made = 0;
-  ready.forEach(r => {
-    const row = r + 2;
+  ready.forEach(x => {
+    const sheet = x.sheet, col = x.col, row = x.row;
     const status = sheet.getRange(row, col.wp_status);
     try {
       const c = {};
-      COLUMNS.forEach(x => { c[x.key] = get(r, x.key); });
+      COLUMNS.forEach(k => { c[k.key] = x.get(k.key); });
       if (!c.title) throw new Error('Case title is empty');
       if (!c.blog_summary) throw new Error('Blog summary is empty');
       if (!c.reviewed_by) throw new Error('Add your initials under "Reviewed by" first');
